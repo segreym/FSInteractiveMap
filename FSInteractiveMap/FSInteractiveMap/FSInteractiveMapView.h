@@ -26,6 +26,6 @@
 - (void)setData:(NSDictionary*)data colorAxis:(NSArray*)colors;
 
 // Layers enumeration
-- (void)enumerateLayersUsingBlock:(void(^)(NSString* identifier, CAShapeLayer* layer))block;
+- (void)enumerateLayersUsingBlock:(void (^)(NSString *identifier, CAShapeLayer *layer, BOOL *stop))block;
 
 @end
