@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
 	s.name = "FSInteractiveMap"
-	s.version = "0.1.0"
+	s.version = "0.1.0-sm"
 	s.summary = "FSInteractiveMap is a charting library to visualize and interact with a vector map on iOS."
 	s.description = <<-DESC
 	It's like Geochart but for iOS. It's loading the maps from simple SVG files. It lets you visualize and interact with a vector map on iOS.
