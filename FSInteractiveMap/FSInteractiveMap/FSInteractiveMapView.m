@@ -9,11 +9,6 @@
 #import "FSInteractiveMapView.h"
 #import "FSSVG.h"
 
-
-static float const kMapZoomMax = 20.0f;
-static float const kMapZoomMin = 0.9f;
-
-
 @interface FSInteractiveMapView ()
 
 @property (nonatomic, strong) FSSVG* svg;
@@ -30,41 +25,63 @@ static float const kMapZoomMin = 0.9f;
 
 @implementation FSInteractiveMapView
 
-- (id)initWithFrame:(CGRect)frame
-{
+- (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
-    
-    if(self) {
-        _scaledPaths = [NSMutableArray array];
-        [self setDefaultParameters];
-        
-        self.touchScale = self.currentScale = 1;
-        self.touchPan = self.currentPan = CGPointZero;
-        
-        UITapGestureRecognizer *tapRecognizer = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTap:)];
-        [self addGestureRecognizer:tapRecognizer];
-        
-        UIPinchGestureRecognizer *pinchRecognizer = [[UIPinchGestureRecognizer alloc] initWithTarget:self action:@selector(handlePinch:)];
-        [self addGestureRecognizer:pinchRecognizer];
-        
-        UIPanGestureRecognizer *panRecognizer = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
-        [self addGestureRecognizer:panRecognizer];
+    if (self) {
+        [self fs_initInternal];
     }
-    
     return self;
+}
+
+- (instancetype)initWithCoder:(NSCoder *)aDecoder {
+    self = [super initWithCoder:aDecoder];
+    if (self) {
+        [self fs_initInternal];
+    }
+    return self;
+}
+
+- (void)fs_initInternal {
+    _scaledPaths = [NSMutableArray array];
+
+    [self setDefaultParameters];
+
+    self.touchScale = self.currentScale = 1;
+    self.touchPan = self.currentPan = CGPointZero;
+
+    UITapGestureRecognizer *tapRecognizer = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTap:)];
+    [self addGestureRecognizer:tapRecognizer];
+
+    UIPinchGestureRecognizer *pinchRecognizer = [[UIPinchGestureRecognizer alloc] initWithTarget:self action:@selector(handlePinch:)];
+    [self addGestureRecognizer:pinchRecognizer];
+
+    UIPanGestureRecognizer *panRecognizer = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
+    [self addGestureRecognizer:panRecognizer];
 }
 
 - (void)setDefaultParameters
 {
+    self.lineWidth = kFSInteractiveMapDefaultLineWidth;
     self.fillColor = [UIColor colorWithWhite:0.85 alpha:1];
     self.strokeColor = [UIColor colorWithWhite:0.6 alpha:1];
+
+    self.animationTime = kFSInteractiveMapDefaultAnimationTime;
+
+    self.minZoom = kFSInteractiveMapDefaultZoomMin;
+    self.maxZoom = kFSInteractiveMapDefaultZoomMax;
+    self.mapInset = UIEdgeInsetsMake(
+            kFSInteractiveMapDefaultZoomPadding,
+            kFSInteractiveMapDefaultZoomPadding,
+            kFSInteractiveMapDefaultZoomPadding,
+            kFSInteractiveMapDefaultZoomPadding
+    );
 }
 
 - (void)setFrame:(CGRect)frame {
     CGSize oldSize = self.frame.size;
     [super setFrame:frame];
     if (!CGSizeEqualToSize(oldSize, frame.size)) {
-        [self updateMapScaled];
+        [self updateMap];
     }
 }
 
@@ -72,7 +89,7 @@ static float const kMapZoomMin = 0.9f;
     CGSize oldSize = self.bounds.size;
     [super setBounds:bounds];
     if (!CGSizeEqualToSize(oldSize, bounds.size)) {
-        [self updateMapScaled];
+        [self updateMap];
     }
 }
 
@@ -94,30 +111,28 @@ static float const kMapZoomMin = 0.9f;
     }
     
     _svg = [FSSVG svgWithFile:mapName];
+
+    // Make the map fit inside the frame
+
+    float preScale = [self mapPreScale];
+    CGAffineTransform scaleTransform = CGAffineTransformMakeScale(preScale, preScale);
+    scaleTransform = CGAffineTransformTranslate(scaleTransform, self.mapInset.left - self.mapInset.right - _svg.bounds.origin.x, self.mapInset.top - self.mapInset.bottom - _svg.bounds.origin.y);
     
     for (FSSVGPathElement* path in _svg.paths) {
-        // Make the map fits inside the frame
-        float scaleHorizontal = self.frame.size.width / _svg.bounds.size.width;
-        float scaleVertical = self.frame.size.height / _svg.bounds.size.height;
-        float scale = MIN(scaleHorizontal, scaleVertical);
-        
-        CGAffineTransform scaleTransform = CGAffineTransformIdentity;
-        scaleTransform = CGAffineTransformMakeScale(scale, scale);
-        scaleTransform = CGAffineTransformTranslate(scaleTransform,-_svg.bounds.origin.x, -_svg.bounds.origin.y);
-        
         UIBezierPath* scaled = [path.path copy];
-        [scaled applyTransform:scaleTransform];
-        
+
         CAShapeLayer *shapeLayer = [CAShapeLayer layer];
         shapeLayer.path = scaled.CGPath;
-        
+
+        [scaled applyTransform:scaleTransform];
+
         // Setting CAShapeLayer properties
         shapeLayer.strokeColor = self.strokeColor.CGColor;
-        shapeLayer.lineWidth = 0.5f;
+        shapeLayer.lineWidth = self.lineWidth;
         
         if(path.fill) {
-            if(colorsDict && [colorsDict objectForKey:path.identifier]) {
-                UIColor* color = [colorsDict objectForKey:path.identifier];
+            if(colorsDict && colorsDict[path.identifier]) {
+                UIColor* color = colorsDict[path.identifier];
                 shapeLayer.fillColor = color.CGColor;
             } else {
                 shapeLayer.fillColor = self.fillColor.CGColor;
@@ -131,6 +146,17 @@ static float const kMapZoomMin = 0.9f;
         
         [_scaledPaths addObject:scaled];
     }
+
+    float scaleHorizontal = (self.frame.size.width - self.mapInset.left - self.mapInset.right) / _svg.bounds.size.width;
+    float scaleVertical = (self.frame.size.height - self.mapInset.top - self.mapInset.bottom) / _svg.bounds.size.height;
+    self.currentScale = MIN(scaleHorizontal, scaleVertical) / preScale;
+
+    self.currentPan = CGPointMake(
+            (self.mapInset.left - self.mapInset.right) / self.currentScale * preScale,
+            (self.mapInset.top - self.mapInset.bottom) / self.currentScale * preScale
+    );
+
+    [self updateMap];
 }
 
 - (void)loadMap:(NSString*)mapName withData:(NSDictionary*)data colorAxis:(NSArray*)colors
@@ -146,7 +172,7 @@ static float const kMapZoomMin = 0.9f;
     float max = -MAXFLOAT;
     
     for (id key in data) {
-        NSNumber* value = [data objectForKey:key];
+        NSNumber* value = data[key];
         
         if([value floatValue] > max)
             max = [value floatValue];
@@ -156,11 +182,11 @@ static float const kMapZoomMin = 0.9f;
     }
     
     for (id key in data) {
-        NSNumber* value = [data objectForKey:key];
-        float s = ([value floatValue] - min) / (max - min);
-        float segmentLength = 1.0 / ([colors count] - 1);
-        int minColorIndex = MAX(floorf(s / segmentLength),0);
-        int maxColorIndex = MIN(ceilf(s / segmentLength), [colors count] - 1);
+        NSNumber* value = data[key];
+        float s = fabsf(([value floatValue] - min) / (max - min));
+        float segmentLength = 1.0f / ([colors count] - 1);
+        NSUInteger minColorIndex = MAX((NSUInteger) floorf(s / segmentLength), 0);
+        NSUInteger maxColorIndex = MIN((NSUInteger) ceilf(s / segmentLength), [colors count] - 1);
         
         UIColor* minColor = colors[minColorIndex];
         UIColor* maxColor = colors[maxColorIndex];
@@ -177,12 +203,12 @@ static float const kMapZoomMin = 0.9f;
         [maxColor getRed:&maxColorRed green:&maxColorGreen blue:&maxColorBlue alpha:nil];
         [minColor getRed:&minColorRed green:&minColorGreen blue:&minColorBlue alpha:nil];
         
-        UIColor* color = [UIColor colorWithRed:minColorRed * (1.0 - s) + maxColorRed * s
-                                         green:minColorGreen * (1.0 - s) + maxColorGreen * s
-                                          blue:minColorBlue * (1.0 - s) + maxColorBlue * s
+        UIColor* color = [UIColor colorWithRed:minColorRed * (1.0f - s) + maxColorRed * s
+                                         green:minColorGreen * (1.0f - s) + maxColorGreen * s
+                                          blue:minColorBlue * (1.0f - s) + maxColorBlue * s
                                          alpha:1];
         
-        [dict setObject:color forKey:key];
+        dict[key] = color;
     }
     
     return dict;
@@ -192,15 +218,15 @@ static float const kMapZoomMin = 0.9f;
 
 - (void)setColors:(NSDictionary*)colorsDict
 {
-    for(int i=0;i<[_scaledPaths count];i++) {
-        FSSVGPathElement* element = _svg.paths[i];
-        
-        if([self.layer.sublayers[i] isKindOfClass:CAShapeLayer.class] && element.fill) {
-            CAShapeLayer* l = self.layer.sublayers[i];
-            
-            if(element.fill) {
-                if(colorsDict && [colorsDict objectForKey:element.identifier]) {
-                    UIColor* color = [colorsDict objectForKey:element.identifier];
+    for (NSUInteger i = 0; i < [_scaledPaths count]; i++) {
+        FSSVGPathElement *element = _svg.paths[i];
+
+        if ([self.layer.sublayers[i] isKindOfClass:CAShapeLayer.class] && element.fill) {
+            CAShapeLayer *l = (CAShapeLayer *) self.layer.sublayers[i];
+
+            if (element.fill) {
+                if (colorsDict && colorsDict[element.identifier]) {
+                    UIColor *color = colorsDict[element.identifier];
                     l.fillColor = color.CGColor;
                 } else {
                     l.fillColor = self.fillColor.CGColor;
@@ -228,6 +254,28 @@ static float const kMapZoomMin = 0.9f;
             block(element.identifier, l, stop);
         }
     }];
+}
+
+- (void)moveToLayer:(CAShapeLayer *)targetLayer animated:(BOOL)anim adjustScale:(BOOL)changeScale {
+    NSUInteger idx = [self.layer.sublayers indexOfObject:targetLayer];
+    if (idx != NSNotFound) {
+        FSSVGPathElement *element = _svg.paths[idx];
+        CGRect bounds = element.path.bounds;
+        float preScale = [self mapPreScale];
+        CGPoint mapPan = CGPointMake(
+                (CGRectGetMidX(_svg.bounds) - CGRectGetMidX(bounds)) * preScale,
+                (CGRectGetMidY(_svg.bounds) - CGRectGetMidY(bounds)) * preScale
+        );
+        if (changeScale) {
+            float hScale = (self.frame.size.width - self.mapInset.left - self.mapInset.right) / bounds.size.width;
+            float vScale = (self.frame.size.height - self.mapInset.top - self.mapInset.bottom) / bounds.size.height;
+            self.currentScale = [self normalizedScale:fminf(hScale, vScale) / preScale];
+        }
+        mapPan.x += (self.mapInset.left - self.mapInset.right) / self.currentScale * preScale;
+        mapPan.y += (self.mapInset.top - self.mapInset.bottom) / self.currentScale * preScale;
+        self.currentPan = mapPan;
+        [self updateMapAnimated:anim];
+    }
 }
 
 #pragma mark - Touch handling
@@ -261,7 +309,7 @@ static float const kMapZoomMin = 0.9f;
             self.currentPan = CGPointMake(self.touchPan.x + self.currentPan.x, self.touchPan.y + self.currentPan.y);
         }
         self.touchPan = CGPointZero;
-        [self updateMapScaled];
+        [self updateMap];
     } else {
         CGPoint oldPoint = self.touchPan;
         CGPoint point = [recognizer translationInView:self];
@@ -280,14 +328,14 @@ static float const kMapZoomMin = 0.9f;
     if (recognizer.state == UIGestureRecognizerStateBegan || recognizer.state == UIGestureRecognizerStateEnded
         || recognizer.state == UIGestureRecognizerStateFailed || recognizer.state == UIGestureRecognizerStateCancelled) {
         if (recognizer.state == UIGestureRecognizerStateEnded) {
-            self.currentScale = fminf(kMapZoomMax, fmaxf(kMapZoomMin, self.touchScale * self.currentScale));
+            self.currentScale = [self normalizedScale:self.touchScale * self.currentScale];
         }
         self.touchScale = 1;
-        [self updateMapScaled];
+        [self updateMap];
     } else {
         CGFloat oldScale = self.touchScale;
         self.touchScale *= recognizer.scale;
-        CGFloat newScale = fminf(kMapZoomMax, fmaxf(kMapZoomMin, self.touchScale * self.currentScale));
+        CGFloat newScale = [self normalizedScale:self.touchScale * self.currentScale];
         if (oldScale * self.currentScale != newScale) {
             [self updateMapWithScale:newScale pan:self.currentPan];
         } else {
@@ -297,36 +345,53 @@ static float const kMapZoomMin = 0.9f;
     }
 }
 
-- (void)updateMapScaled {
-    [self updateMapWithScale:self.currentScale pan:self.currentPan];
+- (void)updateMap {
+    [self updateMapAnimated:NO];
+}
+
+- (void)updateMapAnimated:(BOOL)anim {
+    [self updateMapWithScale:self.currentScale pan:self.currentPan animated:anim];
 }
 
 - (void)updateMapWithScale:(CGFloat)mapScale pan:(CGPoint)mapPan {
+    [self updateMapWithScale:mapScale pan:mapPan animated:NO];
+}
+
+- (void)updateMapWithScale:(CGFloat)mapScale pan:(CGPoint)mapPan animated:(BOOL)anim {
     if (_svg) {
-        float scaleHorizontal = self.frame.size.width / _svg.bounds.size.width;
-        float scaleVertical = self.frame.size.height / _svg.bounds.size.height;
-        float preScale = MIN(scaleHorizontal, scaleVertical);
+        float scale = [self mapPreScale] * mapScale;
         
-        float scale = preScale * mapScale;
-        
-        CGFloat targetX = self.frame.size.width / 2 + mapPan.x * mapScale - (scale * _svg.bounds.size.width - 1) / 2;
-        CGFloat targetY = self.frame.size.height / 2 + mapPan.y * mapScale - (scale * _svg.bounds.size.height - 1) / 2;
+        CGFloat targetX = self.frame.size.width / 2 + mapPan.x * mapScale - CGRectGetMidX(_svg.bounds) * scale;
+        CGFloat targetY = self.frame.size.height / 2 + mapPan.y * mapScale - CGRectGetMidY(_svg.bounds) * scale;
         
         CGAffineTransform translateTransform = CGAffineTransformMakeTranslation(targetX, targetY);
         CGAffineTransform scaleTransform = CGAffineTransformScale(translateTransform, scale, scale);
+
+        [CATransaction setAnimationDuration:anim ? self.animationTime : 0];
         
         for (NSUInteger i = 0; i < [_svg.paths count]; i++) {
             FSSVGPathElement *element = _svg.paths[i];
             if ([self.layer.sublayers[i] isKindOfClass:CAShapeLayer.class] && element.fill) {
                 CAShapeLayer *l = (CAShapeLayer *) self.layer.sublayers[i];
+                l.affineTransform = scaleTransform;
+                l.lineWidth = self.lineWidth / mapScale;
+
                 UIBezierPath *scaled = [element.path copy];
                 [scaled applyTransform:scaleTransform];
-                l.path = scaled.CGPath;
                 _scaledPaths[i] = scaled;
             }
         }
-        [self setNeedsDisplay];
     }
+}
+
+- (float)mapPreScale {
+    float scaleHorizontal = self.frame.size.width / _svg.bounds.size.width;
+    float scaleVertical = self.frame.size.height / _svg.bounds.size.height;
+    return MIN(scaleHorizontal, scaleVertical);
+}
+
+- (float)normalizedScale:(float)srcScale {
+    return fminf(self.maxZoom, fmaxf(self.minZoom, srcScale));
 }
 
 @end
